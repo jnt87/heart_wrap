@@ -1,9 +1,25 @@
-use std::{env, process::{Command, Stdio}, thread, time::Duration, path::Path};
+use std::{env, process::{Command, Stdio}, thread, time::Duration, path::Path, fs};
 use chrono::Local;
 use procfs::process::Process;
 
 fn is_process_running(pid: i32) -> bool {
     Path::new(&format!("/proc/{}", pid)).exists()
+}
+
+fn get_threads(pid: i32) -> Vec<u32> {
+    let path = format!("/proc/{}/task/", pid);
+    if let Ok(entries) = fs::read_dir(path) {
+        return entries
+            .filter_map(|entry| entry.ok())
+            .filter_map(|entry| entry.file_name().to_string_lossy().parse::<u32>().ok())
+            .collect();
+    }
+    Vec::new()
+}
+
+fn print_threads(pid: i32) {
+    let tids = get_threads(pid);
+    println!("Threads (TIDs) of process {}: {:?}", pid, tids);
 }
 
 fn main() {
@@ -42,6 +58,7 @@ fn main() {
                         println!("CPU Time: user={}s, system={}s", stat.utime, stat.stime);
                         println!("Memory Usage: {} bytes", stat.vsize);
                         println!("Resident Set Size (RSS): {} pages", stat.rss);
+                        print_threads(child_id);
                     } else {
                         eprintln!("Failed to retrieve process stat.");
                     }
