@@ -70,6 +70,16 @@ fn print_child_pids(parent_pid: u32) {
     }
 }
 
+fn print_stat_block(statb: procfs::process::Stat, pid: u32) {
+    println!("Process ID: {}", pid);
+    println!("Command: {:?}", statb.comm);
+    println!("State: {:?}", statb.state);
+    println!("Parent PID: {}", statb.ppid);
+    println!("CPU Time: user={}s, system={}s", statb.utime, statb.stime);
+    println!("Memory Usage: {} bytes", statb.vsize);
+    println!("Resident Set Size (RSS): {} pages", statb.rss);
+}
+
 fn main() {
     let args: Vec<String> = env::args().collect();
     if args.len() < 2 {
@@ -99,13 +109,7 @@ fn main() {
             match Process::new(child_id as i32) {
                 Ok(proc) => {
                     if let Ok(stat) = proc.stat() {
-                        println!("Process ID: {}", proc.pid);
-                        println!("Command: {:?}", stat.comm);
-                        println!("State: {:?}", stat.state);
-                        println!("Parent PID: {}", stat.ppid);
-                        println!("CPU Time: user={}s, system={}s", stat.utime, stat.stime);
-                        println!("Memory Usage: {} bytes", stat.vsize);
-                        println!("Resident Set Size (RSS): {} pages", stat.rss);
+                        print_stat_block(stat, child_id);
                         print_threads(child_id);
                         print_child_pids(child_id);
                     } else {
