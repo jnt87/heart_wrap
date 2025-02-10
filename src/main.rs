@@ -1,12 +1,12 @@
-use std::{env, process::{Command, Stdio}, thread, time::Duration, path::Path, fs};
+use std::{env, process::{Command, Stdio}, thread, time::Duration, path::{Path, PathBuf}, fs, io::{self, Read}};
 use chrono::Local;
 use procfs::process::Process;
 
-fn is_process_running(pid: i32) -> bool {
+fn is_process_running(pid: u32) -> bool {
     Path::new(&format!("/proc/{}", pid)).exists()
 }
 
-fn get_threads(pid: i32) -> Vec<u32> {
+fn get_threads(pid: u32) -> Vec<u32> {
     let path = format!("/proc/{}/task/", pid);
     if let Ok(entries) = fs::read_dir(path) {
         return entries
@@ -17,9 +17,57 @@ fn get_threads(pid: i32) -> Vec<u32> {
     Vec::new()
 }
 
-fn print_threads(pid: i32) {
+fn print_threads(pid: u32) {
     let tids = get_threads(pid);
     println!("Threads (TIDs) of process {}: {:?}", pid, tids);
+}
+
+fn get_child_pids(parent_pid: u32) -> io::Result<Vec<u32>> {
+    let mut child_pids = Vec::new();
+    
+    for entry in fs::read_dir("/proc")? {
+        let entry = entry?;
+        let path = entry.path();
+        
+        if !path.is_dir() {
+            continue;
+        }
+
+        if let Some(filename) = path.file_name().and_then(|f| f.to_str()) {
+            let stat_path = format!("/proc/{}/stat", filename);
+            let path_copy = String::from(&stat_path);
+            let path = PathBuf::from(path_copy);
+            if !path.is_file() {
+                continue;
+            }
+            if let Ok(mut file) = fs::File::open(&stat_path) {
+                let mut contents = String::new();
+                file.read_to_string(&mut contents)?;
+                let fields: Vec<&str> = contents.split_whitespace().collect();
+                if let Some(ppid) = fields.get(3).and_then(|s| s.parse::<u32>().ok()) {
+                    if ppid == parent_pid {
+                        if let Ok(pid) = filename.parse::<u32>() {
+                            child_pids.push(pid);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(child_pids)
+}
+
+fn print_child_pids(parent_pid: u32) {
+    match get_child_pids(parent_pid) {
+        Ok(children) => {
+            if children.is_empty() {
+                println!("No child processes found for PID {}", parent_pid);
+            } else {
+                println!("Child PIDs of {}: {:?}", parent_pid, children);
+            }
+        }
+        Err(e) => eprintln!("Error: {}", e),
+    }
 }
 
 fn main() {
@@ -45,10 +93,10 @@ fn main() {
         }
     };
     
-    let child_id = child.id() as i32;
+    let child_id = child.id() as u32;
     let heartbeat_handle = thread::spawn(move || {
         while is_process_running(child_id) {
-            match Process::new(child_id) {
+            match Process::new(child_id as i32) {
                 Ok(proc) => {
                     if let Ok(stat) = proc.stat() {
                         println!("Process ID: {}", proc.pid);
@@ -59,6 +107,7 @@ fn main() {
                         println!("Memory Usage: {} bytes", stat.vsize);
                         println!("Resident Set Size (RSS): {} pages", stat.rss);
                         print_threads(child_id);
+                        print_child_pids(child_id);
                     } else {
                         eprintln!("Failed to retrieve process stat.");
                     }
