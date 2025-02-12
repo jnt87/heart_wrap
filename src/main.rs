@@ -1,6 +1,9 @@
-use std::{env, process::{Command, Stdio}, thread, time::Duration, path::{Path, PathBuf}, fs, io::{self, Read}};
+use std::{env, process::{Command, Stdio, Child}, thread, time::Duration, path::{Path, PathBuf}, fs, io::{self, Read}};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use chrono::Local;
 use procfs::process::Process;
+use log::{info, error};
 
 fn is_process_running(pid: u32) -> bool {
     Path::new(&format!("/proc/{}", pid)).exists()
@@ -80,7 +83,55 @@ fn print_stat_block(statb: procfs::process::Stat, pid: u32) {
     println!("Resident Set Size (RSS): {} pages", statb.rss);
 }
 
+//fn spawn_process(command: &str, args: &[String]) -> Result<Child, std::io::Error>
+fn spawn_process(command: &str, args: &[String]) -> Result<Child, std::io::Error> {
+    info!("Spawning process: {} {:?}", command, args);
+
+    let child = Command::new(command)
+        .args(args)
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .spawn();
+    match child {
+        Ok(child) => {
+            info!("Successfully spawned process with PID: {}", child.id());
+            Ok(child)
+        }
+        Err(e) => {
+            error!("Failed to start process '{}': {}", command, e);
+            Err(e)
+        }
+    }
+}
+
+//fn monitor_process(pid: u32)
+fn monitor_process(pid: u32, running: Arc<AtomicBool>) {
+    info!("Starting process monitoring for PID: {}", pid);
+
+    while running.load(Ordering::SeqCst) && is_process_running(pid) {
+        match Process::new(pid as i32) {
+            Ok(proc) => {
+                match proc.stat() {
+                    Ok(stat) => {
+                        print_stat_block(stat, pid);
+                        print_threads(pid);
+                        print_child_pids(pid);
+                    }
+                    Err(e) => error!("Failed to retrieve process stat for PID {}: {}", pid, e),
+                }
+            }
+            Err(e) => error!("Failed to read process info for PID {}: {}", pid, e),
+        }
+
+        info!("[{}] Heartbeat... Monitoring PID: {}", Local::now().format("%H:%M:%S"), pid);
+        thread::sleep(Duration::from_secs(2));
+    }
+    info!("Process {} has exited or monitoring was stopped.", pid);
+}
+
+//fn handle_exit_status(child: Child) -> i32
 fn main() {
+    env_logger::init();
     let args: Vec<String> = env::args().collect();
     if args.len() < 2 {
         eprintln!("Usage: {} <command> [args...]", args[0]);
@@ -90,41 +141,26 @@ fn main() {
     let command = &args[1];
     let command_args = &args[2..];
 
-    let mut child = match Command::new(command)
-        .args(command_args)
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .spawn()
-    {
+    let mut child = match spawn_process(command, command_args) {
         Ok(child) => child,
-        Err(e) => {
-            eprintln!("Failed to start cmd: {}", e);
+        Err(_) => {
+            eprintln!("Error: Failed to spawn process.");
             std::process::exit(1);
         }
     };
     
     let child_id = child.id() as u32;
-    let heartbeat_handle = thread::spawn(move || {
-        while is_process_running(child_id) {
-            match Process::new(child_id as i32) {
-                Ok(proc) => {
-                    if let Ok(stat) = proc.stat() {
-                        print_stat_block(stat, child_id);
-                        print_threads(child_id);
-                        print_child_pids(child_id);
-                    } else {
-                        eprintln!("Failed to retrieve process stat.");
-                    }
-                }
-                Err(e) => eprintln!("Failed to read process info: {}", e),
-            }
-            println!("[{}] Heartbeat...", Local::now().format("%H:%M:%S"));
-            thread::sleep(Duration::from_secs(2));
-        }
+    let running = Arc::new(AtomicBool::new(true));
+    let running_clone = Arc::clone(&running);
+
+    let monitor_handle = thread::spawn(move || {
+        monitor_process(child_id, running_clone);
     });
 
     let exit_status = child.wait().expect("Failed to wait on child process");
-    let _ = heartbeat_handle.join();
+
+    running.store(false, Ordering::SeqCst);
+    let _ = monitor_handle.join();
 
     std::process::exit(exit_status.code().unwrap_or(1));
 
