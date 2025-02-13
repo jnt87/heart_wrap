@@ -83,7 +83,6 @@ fn print_stat_block(statb: procfs::process::Stat, pid: u32) {
     println!("Resident Set Size (RSS): {} pages", statb.rss);
 }
 
-//fn spawn_process(command: &str, args: &[String]) -> Result<Child, std::io::Error>
 fn spawn_process(command: &str, args: &[String]) -> Result<Child, std::io::Error> {
     info!("Spawning process: {} {:?}", command, args);
 
@@ -104,10 +103,8 @@ fn spawn_process(command: &str, args: &[String]) -> Result<Child, std::io::Error
     }
 }
 
-//fn monitor_process(pid: u32)
 fn monitor_process(pid: u32, running: Arc<AtomicBool>) {
     info!("Starting process monitoring for PID: {}", pid);
-
     while running.load(Ordering::SeqCst) && is_process_running(pid) {
         match Process::new(pid as i32) {
             Ok(proc) => {
@@ -129,7 +126,25 @@ fn monitor_process(pid: u32, running: Arc<AtomicBool>) {
     info!("Process {} has exited or monitoring was stopped.", pid);
 }
 
-//fn handle_exit_status(child: Child) -> i32
+
+fn handle_exit_status(mut child: Child) -> i32 {
+    match child.wait() {
+        Ok(status) => {
+            if let Some(code) = status.code() {
+                info!("Process {} exited with statues code {}", child.id(), code);
+                code
+            } else {
+                error!("Process {} terminated by signal", child.id());
+                1 // Return non-zero if terminated by a signal
+            }
+        }
+        Err(e) => {
+            error!("Failed to retrieve exit status for process {}: {}", child.id(), e);
+            1 // Return non-zero on error
+        }
+    }
+}
+
 fn main() {
     env_logger::init();
     let args: Vec<String> = env::args().collect();
@@ -141,7 +156,7 @@ fn main() {
     let command = &args[1];
     let command_args = &args[2..];
 
-    let mut child = match spawn_process(command, command_args) {
+    let child = match spawn_process(command, command_args) {
         Ok(child) => child,
         Err(_) => {
             eprintln!("Error: Failed to spawn process.");
@@ -157,11 +172,11 @@ fn main() {
         monitor_process(child_id, running_clone);
     });
 
-    let exit_status = child.wait().expect("Failed to wait on child process");
+    let exit_code = handle_exit_status(child);
 
     running.store(false, Ordering::SeqCst);
     let _ = monitor_handle.join();
 
-    std::process::exit(exit_status.code().unwrap_or(1));
+    std::process::exit(exit_code);
 
 }
