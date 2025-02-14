@@ -1,9 +1,48 @@
-use std::{env, process::{Command, Stdio, Child}, thread, time::Duration, path::{Path, PathBuf}, fs, io::{self, Read}};
+use std::{env, process::{Command, Stdio, Child}, thread, time::{Duration, SystemTime}, path::{Path, PathBuf}, fs, io::{self, Read}};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use chrono::Local;
 use procfs::process::Process;
 use log::{info, error};
+
+#[derive(Debug)]
+struct ProcTime {
+    utime: u64,
+    stime: u64,
+}
+
+impl ProcTime {
+    fn from_stat(statb: &procfs::process::Stat) -> Self {
+        Self {
+            utime: statb.utime,
+            stime: statb.stime,
+        }
+    }
+
+    fn has_changed(&self, other: &ProcTime) -> bool {
+        self.utime != other.utime || self.stime != other.stime
+    }
+
+    fn update_time(&mut self, other: &ProcTime) {
+        self.utime = other.utime;
+        self.stime = other.stime;
+    }
+
+    fn uninitialized() -> Self {
+        Self {
+            utime: 0,
+            stime: 0,
+        }
+    }
+}
+
+fn time_check(mut old_time: ProcTime, statb: procfs::process::Stat) -> bool {
+    let time = ProcTime::from_stat(&statb);
+    let changed = old_time.has_changed(&time);
+    old_time.update_time(&time);
+    return changed;
+
+}
 
 fn is_process_running(pid: u32) -> bool {
     Path::new(&format!("/proc/{}", pid)).exists()
@@ -23,6 +62,13 @@ fn get_threads(pid: u32) -> Vec<u32> {
 fn print_threads(pid: u32) {
     let tids = get_threads(pid);
     println!("Threads (TIDs) of process {}: {:?}", pid, tids);
+}
+
+fn send_pulse() -> std::io::Result<()> {
+    let now = SystemTime::now();
+    fs::write("/tmp/heartbeat.txt", format!("{:?}", now))?;
+    log::debug!("Heartbeat updated: {:?}", now);
+    Ok(())
 }
 
 fn get_child_pids(parent_pid: u32) -> io::Result<Vec<u32>> {
@@ -83,6 +129,17 @@ fn print_stat_block(statb: procfs::process::Stat, pid: u32) {
     println!("Resident Set Size (RSS): {} pages", statb.rss);
 }
 
+
+fn is_good_state(statb: procfs::process::Stat) -> bool {
+    return match statb.state {
+        'R' | 'S' => true,
+        'D' => false,
+        'Z' | 'T' => false,
+        _ => false,
+    };
+}
+
+
 fn spawn_process(command: &str, args: &[String]) -> Result<Child, std::io::Error> {
     info!("Spawning process: {} {:?}", command, args);
 
@@ -106,10 +163,21 @@ fn spawn_process(command: &str, args: &[String]) -> Result<Child, std::io::Error
 fn monitor_process(pid: u32, running: Arc<AtomicBool>) {
     info!("Starting process monitoring for PID: {}", pid);
     while running.load(Ordering::SeqCst) && is_process_running(pid) {
+        let mut time_tracker = ProcTime::uninitialized();
         match Process::new(pid as i32) {
             Ok(proc) => {
                 match proc.stat() {
                     Ok(stat) => {
+                        let healthy_state = is_good_state(stat.clone());
+                        let new_time = ProcTime::from_stat(&stat);
+                        let time_changed = time_tracker.has_changed(&new_time);
+                        time_tracker.update_time(&new_time);
+                        if healthy_state && time_changed {
+                            println!("In the Clurb, we all fam");
+                            send_pulse();
+                        } else {
+                            println!("What are you racist?");
+                        }
                         print_stat_block(stat, pid);
                         print_threads(pid);
                         print_child_pids(pid);
