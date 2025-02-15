@@ -4,6 +4,15 @@ use std::sync::Arc;
 use chrono::Local;
 use procfs::process::Process;
 use log::{info, error};
+use signal_hook::consts::signal::*;
+use signal_hook::flag;
+use std::process::exit;
+
+macro_rules! trust_me_bro {
+    ($code:expr) => {{
+        unsafe { $code }
+    }};
+}
 
 #[derive(Debug)]
 struct ProcTime {
@@ -236,6 +245,11 @@ fn main() {
     let running = Arc::new(AtomicBool::new(true));
     let running_clone = Arc::clone(&running);
 
+    let signals = [SIGINT, SIGTERM, SIGHUP];
+    for &sig in &signals {
+        flag::register(sig, Arc::clone(&running)).expect("Failed to register signal handler");
+    }
+
     let monitor_handle = thread::spawn(move || {
         monitor_process(child_id, running_clone);
     });
@@ -245,6 +259,6 @@ fn main() {
     running.store(false, Ordering::SeqCst);
     let _ = monitor_handle.join();
 
-    std::process::exit(exit_code);
+    exit(exit_code);
 
 }
