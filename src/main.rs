@@ -8,11 +8,26 @@ use signal_hook::consts::signal::*;
 use signal_hook::flag;
 use std::process::exit;
 use libc;
+use serde_derive::{Deserialize, Serialize};
+use serde_yaml;
 
 macro_rules! trust_me_bro {
     ($code:expr) => {{
         unsafe { $code }
     }};
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct Config {
+    command: String, 
+    args: Vec<String>,
+    sleep_time: u64,
+}
+
+fn load_config(config_path: &str) -> Result<Config, Box<dyn std::error::Error>> {
+    let config_str = fs::read_to_string(config_path)?;
+    let config: Config = serde_yaml::from_str(&config_str)?;
+    Ok(config)
 }
 
 #[derive(Debug)]
@@ -44,14 +59,6 @@ impl ProcTime {
             stime: 0,
         }
     }
-}
-
-fn time_check(mut old_time: ProcTime, statb: procfs::process::Stat) -> bool {
-    let time = ProcTime::from_stat(&statb);
-    let changed = old_time.has_changed(&time);
-    old_time.update_time(&time);
-    return changed;
-
 }
 
 fn is_process_running(pid: u32) -> bool {
@@ -170,7 +177,7 @@ fn spawn_process(command: &str, args: &[String]) -> Result<Child, std::io::Error
     }
 }
 
-fn monitor_process(pid: u32, running: Arc<AtomicBool>) {
+fn monitor_process(pid: u32, running: Arc<AtomicBool>, sleep: u64) {
     info!("Starting process monitoring for PID: {}", pid);
     while running.load(Ordering::SeqCst) && is_process_running(pid) {
         let mut time_tracker = ProcTime::uninitialized();
@@ -183,10 +190,10 @@ fn monitor_process(pid: u32, running: Arc<AtomicBool>) {
                         let time_changed = time_tracker.has_changed(&new_time);
                         time_tracker.update_time(&new_time);
                         if healthy_state && time_changed {
-                            println!("In the Clurb, we all fam");
-                            send_pulse();
+                            println!("State and time are healthy");
+                            let _ = send_pulse();
                         } else {
-                            println!("What are you racist?");
+                            println!("State or time are unhealthy");
                         }
                         print_stat_block(stat, pid);
                         print_threads(pid);
@@ -199,7 +206,7 @@ fn monitor_process(pid: u32, running: Arc<AtomicBool>) {
         }
 
         info!("[{}] Heartbeat... Monitoring PID: {}", Local::now().format("%H:%M:%S"), pid);
-        thread::sleep(Duration::from_secs(2));
+        thread::sleep(Duration::from_secs(sleep));
     }
     info!("Process {} has exited or monitoring was stopped.", pid);
 }
@@ -230,11 +237,20 @@ fn main() {
         eprintln!("Usage: {} <command> [args...]", args[0]);
         std::process::exit(1);
     }
+    
+    let config_path = &args[1];
 
-    let command = &args[1];
-    let command_args = &args[2..];
+    let config = match load_config(config_path) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            eprintln!("Failed to load config file: {}", e);
+            std::process::exit(1);
+        }
+    };
 
-    let child = match spawn_process(command, command_args) {
+    println!("Using configuration: {:?}", config);
+
+    let child = match spawn_process(&config.command, &config.args) {
         Ok(child) => child,
         Err(_) => {
             eprintln!("Error: Failed to spawn process.");
@@ -248,13 +264,12 @@ fn main() {
 
     let signals = [SIGINT, SIGTERM, SIGHUP];
     for &sig in &signals {
-        let child_pid = child.id() as i32;
         flag::register(sig, Arc::clone(&running)).expect("Failed to register signal handler");
         trust_me_bro!( libc::signal(sig, libc::SIG_DFL) );
     }
 
     let monitor_handle = thread::spawn(move || {
-        monitor_process(child_id, running_clone);
+        monitor_process(child_id, running_clone, config.sleep_time);
     });
 
     let exit_code = handle_exit_status(child);
