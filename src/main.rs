@@ -7,6 +7,7 @@ use log::{info, error};
 use signal_hook::consts::signal::*;
 use signal_hook::flag;
 use std::process::exit;
+use libc;
 
 macro_rules! trust_me_bro {
     ($code:expr) => {{
@@ -247,7 +248,9 @@ fn main() {
 
     let signals = [SIGINT, SIGTERM, SIGHUP];
     for &sig in &signals {
+        let child_pid = child.id() as i32;
         flag::register(sig, Arc::clone(&running)).expect("Failed to register signal handler");
+        trust_me_bro!( libc::signal(sig, libc::SIG_DFL) );
     }
 
     let monitor_handle = thread::spawn(move || {
